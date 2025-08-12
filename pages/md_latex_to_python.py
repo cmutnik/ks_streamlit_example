@@ -178,18 +178,24 @@ def validate_syntax(src: str) -> Tuple[bool, Optional[str]]:
 
 def safe_exec_function(function_src: str, fn_name: str):
     """
-    Execute the generated function in a restricted namespace.
-    We use NumPy versions of sin/cos/... for plotting convenience.
+    Run the generated function in a restricted namespace for plotting.
+    Strip import lines (blocked in sandbox) and provide math/NumPy names.
     """
+    exec_src = "\n".join(
+        ln for ln in function_src.splitlines()
+        if not ln.lstrip().startswith(("from ", "import "))
+    )
     safe_globals = {
-        "__builtins__": {"abs": abs, "min": min, "max": max, "round": round},
+        "__builtins__": {
+            "abs": abs, "min": min, "max": max, "round": round,
+        },
         "np": np,
         "sin": np.sin, "cos": np.cos, "tan": np.tan,
         "log": np.log, "exp": np.exp, "sqrt": np.sqrt,
         "pi": np.pi, "e": np.e,
     }
     local_ns = {}
-    exec(function_src, safe_globals, local_ns)
+    exec(exec_src, safe_globals, local_ns)
     return local_ns[fn_name]
 
 def parse_user_value(s: str):
@@ -200,20 +206,20 @@ def parse_user_value(s: str):
         # Allow simple expressions like "pi/2" without full eval power
         return eval(s, {"__builtins__": {}}, {"np": np, "pi": np.pi, "e": np.e})
 
-def plot_1d(f, arg_name: str, x0: float):
-    xs = np.linspace(x0 - 5, x0 + 5, 400)
+def plot_1d(f, arg_name: str, x_min: float, x_max: float):
+    xs = np.linspace(x_min, x_max, 400)
     ys = np.array([f(x) for x in xs])
     fig = plt.figure()
     plt.plot(xs, ys)
     plt.xlabel(arg_name)
     plt.ylabel(f"f({arg_name})")
-    plt.title(f"1D slice around {arg_name}={x0:.4g}")
+    plt.title(f"1D slice: {x_min:g} to {x_max:g}")
     st.pyplot(fig)
 
-def plot_2d(f, arg_names: List[str], x0: float, y0: float):
+def plot_2d(f, arg_names: List[str], x_min: float, x_max: float, y_min: float, y_max: float):
     xname, yname = arg_names[:2]
-    X = np.linspace(x0 - 5, x0 + 5, 200)
-    Y = np.linspace(y0 - 5, y0 + 5, 200)
+    X = np.linspace(x_min, x_max, 200)
+    Y = np.linspace(y_min, y_max, 200)
     XX, YY = np.meshgrid(X, Y)
     Z = np.zeros_like(XX, dtype=float)
     for i in range(XX.shape[0]):
@@ -222,7 +228,7 @@ def plot_2d(f, arg_names: List[str], x0: float, y0: float):
     fig = plt.figure()
     cs = plt.contourf(XX, YY, Z, levels=20)
     plt.xlabel(xname); plt.ylabel(yname)
-    plt.title(f"2D contour around ({xname}={x0:.4g}, {yname}={y0:.4g})")
+    plt.title(f"2D contour: {xname} in [{x_min:g},{x_max:g}], {yname} in [{y_min:g},{y_max:g}]")
     plt.colorbar(cs)
     st.pyplot(fig)
 
@@ -341,16 +347,48 @@ if st.session_state.converted:
             cols = st.columns(min(4, max(1, len(args))))
             for i, a in enumerate(args):
                 with cols[i % len(cols)]:
-                    # Do NOT assign back to st.session_state here; Streamlit handles that via key
                     st.text_input(f"{a} =", value=st.session_state[f"val_{a}"], key=f"val_{a}")
 
+            # Plot limit inputs (depend on dimensionality)
+            limit_cols = st.columns(2)
+            # sensible defaults derived from current inputs after submit; here just placeholders
+            # We'll recompute after submit if user leaves blank.
+            if len(args) == 1:
+                xname = args[0]
+                st.session_state.setdefault(f"lim_{xname}_low", "")
+                st.session_state.setdefault(f"lim_{xname}_high", "")
+                with limit_cols[0]:
+                    st.text_input(f"{xname} min", key=f"lim_{xname}_low", value=st.session_state[f"lim_{xname}_low"])
+                with limit_cols[1]:
+                    st.text_input(f"{xname} max", key=f"lim_{xname}_high", value=st.session_state[f"lim_{xname}_high"])
+
             slice_vars = None
-            if len(args) >= 3:
-                st.caption("Pick two variables to plot a 2D contour slice (others fixed to sample values).")
-                c1, c2 = st.columns(2)
-                sv1 = c1.selectbox("X-axis variable", args, index=0, key="sv1")
-                sv2 = c2.selectbox("Y-axis variable", [a for a in args if a != sv1], index=0, key="sv2")
-                slice_vars = (sv1, sv2)
+            if len(args) >= 2:
+                # For 2D (or 3D+ with slice), choose axes
+                if len(args) == 2:
+                    xname, yname = args[0], args[1]
+                else:
+                    st.caption("Pick two variables to plot a 2D contour slice (others fixed to sample values).")
+                    c1, c2 = st.columns(2)
+                    xname = c1.selectbox("X-axis variable", args, index=0, key="sv1")
+                    y_candidates = [a for a in args if a != xname]
+                    yname = c2.selectbox("Y-axis variable", y_candidates, index=0, key="sv2")
+                    slice_vars = (xname, yname)
+
+                # Range inputs for chosen axes
+                for var in (xname, yname):
+                    st.session_state.setdefault(f"lim_{var}_low", "")
+                    st.session_state.setdefault(f"lim_{var}_high", "")
+                c3, c4 = st.columns(2)
+                with c3:
+                    st.text_input(f"{xname} min", key=f"lim_{xname}_low", value=st.session_state[f"lim_{xname}_low"])
+                with c4:
+                    st.text_input(f"{xname} max", key=f"lim_{xname}_high", value=st.session_state[f"lim_{xname}_high"])
+                c5, c6 = st.columns(2)
+                with c5:
+                    st.text_input(f"{yname} min", key=f"lim_{yname}_low", value=st.session_state[f"lim_{yname}_low"])
+                with c6:
+                    st.text_input(f"{yname} max", key=f"lim_{yname}_high", value=st.session_state[f"lim_{yname}_high"])
 
             submitted = st.form_submit_button("Run sample")
 
@@ -361,21 +399,52 @@ if st.session_state.converted:
                 result = f(*num_vals)
                 st.success(f"{fn_name}({', '.join(f'{a}={v}' for a, v in zip(args, num_vals))}) = {result}")
 
-                # Plots
+                # Derive default ranges if blanks; ensure min < max
+                def parse_lim(var, center, span=5.0):
+                    low_s = st.session_state.get(f"lim_{var}_low", "").strip()
+                    high_s = st.session_state.get(f"lim_{var}_high", "").strip()
+                    if low_s == "" and high_s == "":
+                        return center - span, center + span
+                    low = parse_user_value(low_s) if low_s != "" else center - span
+                    high = parse_user_value(high_s) if high_s != "" else center + span
+                    if low == high:
+                        # expand slightly to avoid zero-length range
+                        low, high = low - 1.0, high + 1.0
+                    if low > high:
+                        low, high = high, low
+                    return float(low), float(high)
+
                 if len(args) == 1:
-                    plot_1d(f, args[0], float(num_vals[0]))
+                    xname = args[0]
+                    x0 = float(num_vals[0])
+                    x_min, x_max = parse_lim(xname, x0)
+                    plot_1d(f, xname, x_min, x_max)
+
                 elif len(args) == 2:
-                    plot_2d(f, args, float(num_vals[0]), float(num_vals[1]))
-                elif slice_vars:
-                    xname, yname = slice_vars
+                    xname, yname = args[0], args[1]
+                    x0 = float(num_vals[0])
+                    y0 = float(num_vals[1])
+                    x_min, x_max = parse_lim(xname, x0)
+                    y_min, y_max = parse_lim(yname, y0)
+                    plot_2d(f, [xname, yname], x_min, x_max, y_min, y_max)
+
+                else:
+                    # 3D+ : contour slice using two chosen vars, others fixed
+                    xname = st.session_state.get("sv1", args[0])
+                    yname = st.session_state.get("sv2", args[1] if args[1] != xname else args[0])
                     x0 = float(num_vals[args.index(xname)])
                     y0 = float(num_vals[args.index(yname)])
+
                     def f2(x, y):
                         vals = num_vals.copy()
                         vals[args.index(xname)] = x
                         vals[args.index(yname)] = y
                         return f(*vals)
-                    plot_2d(f2, [xname, yname], x0, y0)
+
+                    x_min, x_max = parse_lim(xname, x0)
+                    y_min, y_max = parse_lim(yname, y0)
+                    plot_2d(f2, [xname, yname], x_min, x_max, y_min, y_max)
+
             except Exception as e:
                 st.error(f"Runtime error: {e}")
 
@@ -386,9 +455,6 @@ with st.expander("Notes & tips"):
 - Results persist using `st.session_state`, so submitting the form won’t “reset” the page.
 - SymPy (if available) is used first for parsing; otherwise a heuristic converter is used.
 - The downloaded `.py` includes `from math import ...` for any needed names (`sin`, `cos`, `pi`, etc.).
-- Plots:
-  - 1 variable → line slice around your sample.
-  - 2 variables → 2D contour.
-  - 3+ variables → pick two variables to slice; others fixed to your sample values.
+- Plot limits: leave blank to auto-use ±5 around your sample values. Enter expressions like `pi/2` if you want.
 """
     )
