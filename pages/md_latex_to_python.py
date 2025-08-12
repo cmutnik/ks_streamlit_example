@@ -9,7 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 
-# Optional SymPy for LaTeX parsing
+# Optional SymPy for LaTeX parsing (used if available and enabled)
 try:
     from sympy.parsing.latex import parse_latex  # type: ignore
     SYMPY_AVAILABLE = True
@@ -18,14 +18,17 @@ except Exception:
 
 st.set_page_config(page_title="Markdown Equation → Python Function", page_icon="🧮", layout="centered")
 st.title("🧮 Markdown/LaTeX Equation → Python Function")
-st.caption("Type an equation like `$y = x^2 + 3x + 1$` or `$$f(x)=\\sin(x)+x^2$$`. I’ll render it and generate a Python function.")
+st.caption(
+    "Type an equation like `$y = x^2 + 3x + 1` or `$$f(x)=\\sin(x)+x^2$$`. "
+    "I’ll render it and generate a Python function (with imports) plus sample plots."
+)
 
 # ------------------ Helpers ------------------
 MATH_BLOCKS = [
-    (r"\$\$(.+?)\$\$", re.DOTALL),
-    (r"\$(.+?)\$", 0),
-    (r"\\\((.+?)\\\)", 0),
-    (r"\\\[(.+?)\\\]", re.DOTALL),
+    (r"\$\$(.+?)\$\$", re.DOTALL),  # $$ ... $$
+    (r"\$(.+?)\$", 0),              # $ ... $
+    (r"\\\((.+?)\\\)", 0),          # \( ... \)
+    (r"\\\[(.+?)\\\]", re.DOTALL),  # \[ ... \]
 ]
 
 LATEX_FUNCS = {
@@ -38,6 +41,8 @@ LATEX_FUNCS = {
     r"\sqrt": "sqrt",
 }
 LATEX_CONSTS = {r"\pi": "pi", r"\mathrm{e}": "e", r"\E": "e"}
+
+# Names considered "built-in" mathy identifiers for detection
 PY_BUILTINS_FUNCS = {"sin", "cos", "tan", "log", "exp", "sqrt"}
 PY_CONSTS = {"pi", "e"}
 IDENT_RE = re.compile(r"\b[A-Za-z_]\w*\b")
@@ -49,6 +54,7 @@ def extract_first_math(md: str) -> Optional[str]:
         m = re.search(pat, md, flags)
         if m:
             return m.group(1).strip()
+    # Fallback: take a line that looks like an equation
     lines = [ln.strip() for ln in md.splitlines() if ln.strip()]
     for ln in lines:
         if any(ch in ln for ch in "=^_\\"):
@@ -67,37 +73,66 @@ def replace_frac_once(s: str) -> Tuple[str, bool]:
     return new, (new != s)
 
 def latex_to_python(expr: str) -> str:
+    """Heuristic LaTeX → Python converter (used if SymPy isn't used/available)."""
     expr = strip_latex_wrappers(expr)
+
+    # Replace \frac recursively
     changed = True
     while changed:
         expr, changed = replace_frac_once(expr)
+
+    # Exponentiation
     expr = expr.replace("^", "**")
+
+    # Subscripts: x_{1} -> x1
     expr = re.sub(r"([A-Za-z])_\{([A-Za-z0-9]+)\}", r"\1\2", expr)
     expr = re.sub(r"([A-Za-z])_([A-Za-z0-9]+)", r"\1\2", expr)
+
+    # Multiplication markers
     expr = expr.replace(r"\cdot", "*").replace(r"\times", "*")
+
+    # Functions with parentheses: \sin( -> sin(
     for k, v in LATEX_FUNCS.items():
         expr = re.sub(re.escape(k) + r"\s*\(", v + "(", expr)
+
+    # Functions without parentheses: \sin x -> sin(x)
     for k, v in LATEX_FUNCS.items():
         expr = re.sub(re.escape(k) + r"\s+([A-Za-z0-9_]+)", v + r"(\1)", expr)
+
+    # Constants
     for k, v in LATEX_CONSTS.items():
         expr = expr.replace(k, v)
+
+    # Remove braces around single tokens
     expr = re.sub(r"\{([A-Za-z0-9_\.]+)\}", r"\1", expr)
+
+    # Remove stray backslashes
     expr = re.sub(r"\\", "", expr)
+
+    # Normalize spaces
     return re.sub(r"\s+", " ", expr).strip()
 
 def split_equation(eq: str) -> Tuple[str, str]:
+    """Return (lhs, rhs). If no '=', treat as y = eq."""
     if "=" in eq:
         lhs, rhs = eq.split("=", 1)
         return lhs.strip(), rhs.strip()
     return "y", eq.strip()
 
 def infer_function_name(lhs: str) -> Tuple[str, List[str]]:
+    """
+    Infer function name and explicit args from lhs like:
+    y            -> ('y', [])
+    f(x)         -> ('f', ['x'])
+    g(x, y, z)   -> ('g', ['x','y','z'])
+    """
     m = re.match(r"^\s*([A-Za-z_]\w*)\s*\(\s*([A-Za-z0-9_,\s]*)\s*\)\s*$", lhs)
     if m:
         name = m.group(1)
         args = [a.strip() for a in m.group(2).split(",") if a.strip()]
         return name, args
-    name = re.sub(r"[^A-Za-z0-9_]", "", lhs) or "f"
+    # Otherwise, simple variable name (e.g., y)
+    name = re.sub(r"[^A-Za-z0-9_]", "", lhs) or "my_custom_function"
     return name, []
 
 def infer_args(rhs_py: str, declared_args: List[str], lhs_name: str) -> List[str]:
@@ -111,10 +146,21 @@ def infer_args(rhs_py: str, declared_args: List[str], lhs_name: str) -> List[str
     return declared_args + [t for t in inferred if t not in declared_args] if declared_args else inferred
 
 def build_function_source(fn_name: str, args: List[str], rhs_py: str, doc_md: str) -> str:
+    """Create the full .py text with imports + function def."""
     args_src = ", ".join(args) if args else ""
     body = f"return {rhs_py}" if rhs_py else "pass"
     doc = textwrap.indent((doc_md or "Auto-generated from Markdown/LaTeX.").strip(), " " * 4)
-    return f"""def {fn_name}({args_src}):
+
+    # Detect needed math identifiers and create import lines
+    tokens = set(IDENT_RE.findall(rhs_py))
+    needed_funcs = sorted(tokens & PY_BUILTINS_FUNCS)
+    needed_consts = sorted(tokens & PY_CONSTS)
+    imports = []
+    if needed_funcs or needed_consts:
+        imports.append(f"from math import {', '.join(needed_funcs + needed_consts)}")
+    imports_code = "\n".join(imports) + ("\n\n" if imports else "")
+
+    return f"""{imports_code}def {fn_name}({args_src}):
     \"\"\"
 {doc}
     \"\"\"
@@ -131,6 +177,10 @@ def validate_syntax(src: str) -> Tuple[bool, Optional[str]]:
         return False, f"{type(e).__name__}: {e}"
 
 def safe_exec_function(function_src: str, fn_name: str):
+    """
+    Execute the generated function in a restricted namespace.
+    We use NumPy versions of sin/cos/... for plotting convenience.
+    """
     safe_globals = {
         "__builtins__": {"abs": abs, "min": min, "max": max, "round": round},
         "np": np,
@@ -147,6 +197,7 @@ def parse_user_value(s: str):
     try:
         return float(s)
     except Exception:
+        # Allow simple expressions like "pi/2" without full eval power
         return eval(s, {"__builtins__": {}}, {"np": np, "pi": np.pi, "e": np.e})
 
 def plot_1d(f, arg_name: str, x0: float):
@@ -211,7 +262,7 @@ with col2:
 st.markdown("---")
 
 # ------------------ Convert button ------------------
-if st.button("Convert to Python function", type="primary", use_container_width=True, key="convert_btn"):
+if st.button("Convert to Python function", type="primary", use_container_width=True):
     eq_block = extract_first_math(st.session_state.get("md_input") or "")
     if not eq_block:
         st.error("No equation found. Put it inside $...$ or $$...$$.")
@@ -220,6 +271,7 @@ if st.button("Convert to Python function", type="primary", use_container_width=T
         rhs_py = None
         lhs_name, lhs_declared_args = infer_function_name(lhs_raw)
 
+        # SymPy first (if enabled and available)
         if (prefer_sympy and SYMPY_AVAILABLE):
             try:
                 sym = parse_latex(eq_block)
@@ -232,11 +284,22 @@ if st.button("Convert to Python function", type="primary", use_container_width=T
             except Exception:
                 rhs_py = None
 
+        # Fallback heuristic
         if not rhs_py:
             rhs_py = latex_to_python(rhs_raw)
 
+        # Infer arguments
         args = infer_args(rhs_py, lhs_declared_args, lhs_name)
-        fn_name = re.sub(r"\W+", "", fn_name_override.strip()) if fn_name_override.strip() else (lhs_name or "f")
+
+        # Determine function name with default to my_custom_function
+        if fn_name_override.strip():
+            fn_name = re.sub(r"\W+", "", fn_name_override.strip())
+        elif lhs_name and lhs_name.lower() not in ("y", "f"):
+            fn_name = lhs_name
+        else:
+            fn_name = "my_custom_function"
+
+        # Build and validate code
         function_src = build_function_source(fn_name, args, rhs_py, doc_md=eq_block)
         ok, err = validate_syntax(function_src)
 
@@ -245,15 +308,16 @@ if st.button("Convert to Python function", type="primary", use_container_width=T
             if err:
                 st.code(err)
         else:
-            # Persist to state so subsequent reruns keep results visible
-            st.session_state.converted = True
-            st.session_state.function_src = function_src
-            st.session_state.fn_name = fn_name
-            st.session_state.args = args
-            st.session_state.eq_block = eq_block
-            st.session_state.rhs_py = rhs_py
+            st.session_state.update({
+                "converted": True,
+                "function_src": function_src,
+                "fn_name": fn_name,
+                "args": args,
+                "eq_block": eq_block,
+                "rhs_py": rhs_py,
+            })
 
-# ------------------ Render conversion results from state ------------------
+# ------------------ Render conversion results ------------------
 if st.session_state.converted:
     st.subheader("Generated function")
     st.code(st.session_state.function_src, language="python")
@@ -261,7 +325,6 @@ if st.session_state.converted:
     buf = io.BytesIO(st.session_state.function_src.encode("utf-8"))
     st.download_button("⬇️ Download .py", data=buf, file_name=f"{st.session_state.fn_name}.py", mime="text/x-python")
 
-    # --- Sample runner & plots ---
     args = st.session_state.args
     fn_name = st.session_state.fn_name
     function_src = st.session_state.function_src
@@ -270,17 +333,20 @@ if st.session_state.converted:
         st.markdown("---")
         st.subheader("Try it and see plots")
 
-        # Use a form; keep values in session via unique keys
+        # Initialize defaults BEFORE creating widgets to avoid key mutation errors
+        for a in args:
+            st.session_state.setdefault(f"val_{a}", "1.0")
+
         with st.form("sample_form", clear_on_submit=False):
             cols = st.columns(min(4, max(1, len(args))))
-            input_vals = {}
             for i, a in enumerate(args):
-                default_val = st.session_state.get(f"val_{a}", "1.0")
                 with cols[i % len(cols)]:
-                    input_vals[a] = st.text_input(f"{a} =", value=default_val, key=f"val_{a}")
+                    # Do NOT assign back to st.session_state here; Streamlit handles that via key
+                    st.text_input(f"{a} =", value=st.session_state[f"val_{a}"], key=f"val_{a}")
+
             slice_vars = None
             if len(args) >= 3:
-                st.caption("Pick two variables to plot a 2D contour slice (others fixed at the sample values).")
+                st.caption("Pick two variables to plot a 2D contour slice (others fixed to sample values).")
                 c1, c2 = st.columns(2)
                 sv1 = c1.selectbox("X-axis variable", args, index=0, key="sv1")
                 sv2 = c2.selectbox("Y-axis variable", [a for a in args if a != sv1], index=0, key="sv2")
@@ -295,25 +361,21 @@ if st.session_state.converted:
                 result = f(*num_vals)
                 st.success(f"{fn_name}({', '.join(f'{a}={v}' for a, v in zip(args, num_vals))}) = {result}")
 
+                # Plots
                 if len(args) == 1:
                     plot_1d(f, args[0], float(num_vals[0]))
                 elif len(args) == 2:
                     plot_2d(f, args, float(num_vals[0]), float(num_vals[1]))
-                else:
-                    if slice_vars:
-                        xname, yname = slice_vars
-                        x0 = float(num_vals[args.index(xname)])
-                        y0 = float(num_vals[args.index(yname)])
-
-                        def f2(x, y):
-                            vals = num_vals.copy()
-                            vals[args.index(xname)] = x
-                            vals[args.index(yname)] = y
-                            return f(*vals)
-
-                        plot_2d(f2, [xname, yname], x0, y0)
-                    else:
-                        st.info("Choose two variables to draw a 2D contour slice.")
+                elif slice_vars:
+                    xname, yname = slice_vars
+                    x0 = float(num_vals[args.index(xname)])
+                    y0 = float(num_vals[args.index(yname)])
+                    def f2(x, y):
+                        vals = num_vals.copy()
+                        vals[args.index(xname)] = x
+                        vals[args.index(yname)] = y
+                        return f(*vals)
+                    plot_2d(f2, [xname, yname], x0, y0)
             except Exception as e:
                 st.error(f"Runtime error: {e}")
 
@@ -322,8 +384,8 @@ with st.expander("Notes & tips"):
     st.markdown(
         """
 - Results persist using `st.session_state`, so submitting the form won’t “reset” the page.
-- Put your equation in `$...$` or `$$...$$` so it can be detected and rendered.
-- SymPy (if available) is preferred for parsing; otherwise a heuristic converter is used.
+- SymPy (if available) is used first for parsing; otherwise a heuristic converter is used.
+- The downloaded `.py` includes `from math import ...` for any needed names (`sin`, `cos`, `pi`, etc.).
 - Plots:
   - 1 variable → line slice around your sample.
   - 2 variables → 2D contour.
