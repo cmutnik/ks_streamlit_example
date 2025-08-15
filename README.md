@@ -1,8 +1,9 @@
 # Two Sample Comparator App
 
-App deployed with Python 3.10.17 at:
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://distributions-and-metrics.streamlit.app/)
+[![Python](https://img.shields.io/badge/python-3.10.17%2B-blue.svg)](https://www.python.org/)
+<!-- [![Docs](https://img.shields.io/badge/docs-online-blue.svg)](https://takotime808.github.io/multioutreg/) -->
 
-[https://distributions-and-metrics.streamlit.app/](https://distributions-and-metrics.streamlit.app/)
 
 This Streamlit app compares two uploaded samples using statistical tests like **Kolmogorov-Smirnov** and **Anderson-Darling**. It includes:
 - Histogram and ECDF visualizations

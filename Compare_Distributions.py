@@ -1,3 +1,5 @@
+# Copyright (c) 2025 takotime808
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -15,8 +17,10 @@ st.sidebar.header("Step 1: Upload Files")
 uploaded_file1 = st.sidebar.file_uploader("Upload CSV for Sample 1", type=["csv"])
 uploaded_file2 = st.sidebar.file_uploader("Upload CSV for Sample 2", type=["csv"])
 
+
 def get_filterable_columns(df):
     return df.select_dtypes(include=[np.number, "category", "object"]).columns.tolist()
+
 
 def filter_dataframe(df, label):
     st.subheader(f"🔍 Filter: {label}")
@@ -33,9 +37,57 @@ def filter_dataframe(df, label):
                 filtered_df = filtered_df[df[col].isin(selected)]
     return filtered_df
 
+
+def detect_sampling_method(df):
+    """Try to infer the sampling method used to collect the data.
+
+    The function uses simple heuristics based on the presence of grouping
+    columns or constant step sizes in numeric columns.
+    It returns a tuple of (method, justification).
+    """
+
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    for col in numeric_cols:
+        diffs = df[col].dropna().diff().dropna()
+        if len(diffs) > 0 and diffs.nunique() == 1 and diffs.iloc[0] != 0:
+            step = diffs.iloc[0]
+            return (
+                "Systematic Sampling",
+                f"Values in column '{col}' increment by a constant step of {step}",
+            )
+
+    for col in df.columns:
+        low = col.lower()
+        if any(key in low for key in ["strata", "stratum", "group", "cluster"]):
+            counts = df[col].value_counts()
+            if not counts.empty:
+                imbalance = (counts.max() - counts.min()) / counts.mean()
+                if imbalance < 0.5:
+                    return (
+                        "Stratified Sampling",
+                        f"Column '{col}' has relatively balanced group sizes",
+                    )
+                return (
+                    "Cluster Sampling",
+                    f"Column '{col}' indicates clusters with varying sizes",
+                )
+
+    return (
+        "Simple Random Sampling",
+        "No constant increments or grouping columns detected",
+    )
+
+
 if uploaded_file1 and uploaded_file2:
     df1 = pd.read_csv(uploaded_file1)
     df2 = pd.read_csv(uploaded_file2)
+
+    method1, just1 = detect_sampling_method(df1)
+    method2, just2 = detect_sampling_method(df2)
+
+    with st.expander("Detected Sampling Methods", expanded=False):
+        st.markdown(f"**Sample 1:** {method1}  \n*Justification:* {just1}")
+        st.markdown(f"**Sample 2:** {method2}  \n*Justification:* {just2}")
 
     # === Optional Filters ===
     df1 = filter_dataframe(df1, "Sample 1")
